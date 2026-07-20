@@ -81,11 +81,18 @@ func intersects(setA, setB map[string]bool) bool {
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "godap [server address]",
+		Use:   "godap [server address | connection name]",
 		Short: "A complete TUI for LDAP.",
-		Args:  cobra.RangeArgs(0, 1),
+		Long: `A complete TUI for LDAP.
+
+The positional argument selects the server to connect to. When a config file
+is present, it is first checked as a named connection; if no match is found it
+is treated as a server address. Omit it entirely to use the default connection
+from the config file.`,
+		Args: cobra.RangeArgs(0, 1),
 		Run: func(cmd *cobra.Command, args []string) {
 			// Load config file and apply values for flags not explicitly set on CLI.
+			var cfg *config.Config
 			var cfgPath string
 			if cmd.Flags().Changed("config") {
 				cfgPath = tui.ConfigFile
@@ -93,7 +100,8 @@ func main() {
 				cfgPath, _ = config.FindConfigFile()
 			}
 			if cfgPath != "" {
-				cfg, err := config.Load(cfgPath)
+				var err error
+				cfg, err = config.Load(cfgPath)
 				if err != nil {
 					log.Fatalf("Config file error: %v", err)
 				}
@@ -103,7 +111,7 @@ func main() {
 					if conn == nil {
 						log.Fatalf("Config: connection %q not found in %s", tui.ConnectionName, cfgPath)
 					}
-				} else {
+				} else if len(args) == 0 {
 					conn = cfg.DefaultConn()
 				}
 				if conn != nil {
@@ -177,10 +185,20 @@ func main() {
 				tui.LdapPassword = string(passwordBytes)
 			}
 
-			if len(args) == 1 {
-				tui.LdapServer = args[0]
+			if len(args) == 1 && !cmd.Flags().Changed("connection") {
+				// When --connection was not explicitly set, check whether the positional
+				// arg names a config connection; fall back to treating it as a server address.
+				if cfg != nil {
+					if conn := cfg.FindConnection(args[0]); conn != nil {
+						applyConnectionConfig(cmd, conn)
+					} else {
+						tui.LdapServer = args[0]
+					}
+				} else {
+					tui.LdapServer = args[0]
+				}
 			} else if tui.LdapServer == "" {
-				log.Fatal("No server address provided. Specify a server as a positional argument or via a config file connection.")
+				log.Fatal("No server address provided. Specify a server address, a config connection name, or set a default connection in the config file.")
 			}
 
 			if tui.LdapPort == 0 {
