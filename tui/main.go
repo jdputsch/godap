@@ -82,6 +82,9 @@ var (
 	SSHTunnelInsecure      bool
 	DebugLogPath           string
 
+	ConfigFile     string
+	ConnectionName string
+
 	page int
 )
 
