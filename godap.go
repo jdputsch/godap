@@ -91,7 +91,8 @@ is treated as a server address. Omit it entirely to use the default connection
 from the config file.`,
 		Args: cobra.RangeArgs(0, 1),
 		Run: func(cmd *cobra.Command, args []string) {
-			// Load config file and apply values for flags not explicitly set on CLI.
+			// Load config file and resolve connection — must happen before any env var,
+			// prompt, or inference that depends on connection values.
 			var cfg *config.Config
 			var cfgPath string
 			if cmd.Flags().Changed("config") {
@@ -111,19 +112,33 @@ from the config file.`,
 					if conn == nil {
 						log.Fatalf("Config: connection %q not found in %s", tui.ConnectionName, cfgPath)
 					}
-				} else if len(args) == 0 {
+				} else if len(args) == 1 {
+					// Positional arg: try as a connection name first, fall back to server address.
+					conn = cfg.FindConnection(args[0])
+					if conn == nil {
+						tui.LdapServer = args[0]
+					}
+				} else { // len(args) == 0
 					conn = cfg.DefaultConn()
 				}
 				if conn != nil {
 					applyConnectionConfig(cmd, conn)
 				}
 				applyGlobalConfig(cmd, &cfg.Global)
+			} else if len(args) == 1 {
+				// No config file: positional arg is a server address.
+				tui.LdapServer = args[0]
+			}
+
+			if tui.LdapServer == "" {
+				log.Fatal("No server address provided. Specify a server address, a config connection name, or set a default connection in the config file.")
 			}
 
 			// Apply GODAP_PASSWD env var when no explicit password flag was provided.
 			if !cmd.Flags().Changed("password") && !cmd.Flags().Changed("passfile") {
 				if envPw := os.Getenv("GODAP_PASSWD"); envPw != "" {
 					tui.LdapPassword = envPw
+					tui.LdapPasswordFile = "" // env var supersedes config passfile
 				}
 			}
 
@@ -150,22 +165,6 @@ from the config file.`,
 				tui.LdapPassword = string(passwordBytes)
 			}
 
-			if len(args) == 1 && !cmd.Flags().Changed("connection") {
-				// When --connection was not explicitly set, check whether the positional
-				// arg names a config connection; fall back to treating it as a server address.
-				if cfg != nil {
-					if conn := cfg.FindConnection(args[0]); conn != nil {
-						applyConnectionConfig(cmd, conn)
-					} else {
-						tui.LdapServer = args[0]
-					}
-				} else {
-					tui.LdapServer = args[0]
-				}
-			} else if tui.LdapServer == "" {
-				log.Fatal("No server address provided. Specify a server address, a config connection name, or set a default connection in the config file.")
-			}
-
 			// Apply GODAP_SSH_PASSWORD env var when no explicit SSH password flag was provided.
 			if !cmd.Flags().Changed("ssh-password") && !cmd.Flags().Changed("ssh-passfile") {
 				if envPw := os.Getenv("GODAP_SSH_PASSWORD"); envPw != "" {
@@ -174,7 +173,7 @@ from the config file.`,
 			}
 
 			// --ssh-passfile: read password from file or prompt on "-".
-			if cmd.Flags().Changed("ssh-passfile") {
+			if cmd.Flags().Changed("ssh-passfile") || tui.SSHTunnelPasswordFile != "" {
 				pw, err := tui.ReadFileOrStdin(tui.SSHTunnelPasswordFile, "SSH Password: ")
 				if err != nil {
 					log.Fatalf("Failed to read SSH password file: %v", err)
