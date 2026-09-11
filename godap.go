@@ -127,41 +127,6 @@ from the config file.`,
 				}
 			}
 
-			// Apply GODAP_SSH_PASSWORD env var when no explicit SSH password flag was provided.
-			if !cmd.Flags().Changed("ssh-password") && !cmd.Flags().Changed("ssh-passfile") {
-				if envPw := os.Getenv("GODAP_SSH_PASSWORD"); envPw != "" {
-					tui.SSHTunnelPassword = envPw
-				}
-			}
-
-			// --ssh-passfile: read password from file or prompt on "-".
-			if cmd.Flags().Changed("ssh-passfile") {
-				pw, err := tui.ReadFileOrStdin(tui.SSHTunnelPasswordFile, "SSH Password: ")
-				if err != nil {
-					log.Fatalf("Failed to read SSH password file: %v", err)
-				}
-				tui.SSHTunnelPassword = strings.TrimSpace(pw)
-			}
-
-			// Infer SSH auth method from flags; explicit --ssh-auth is honoured only as a fallback.
-			sshAgentSet := tui.SSHTunnelAgentAuth
-			sshKeySet := cmd.Flags().Changed("ssh-key")
-			sshPassSet := tui.SSHTunnelPassword != ""
-			switch {
-			case sshAgentSet && sshKeySet:
-				log.Fatal("Conflicting SSH auth flags: --ssh-agent and --ssh-key cannot both be set")
-			case sshAgentSet && sshPassSet:
-				log.Fatal("Conflicting SSH auth flags: --ssh-agent and --ssh-password/--ssh-passfile cannot both be set")
-			case sshKeySet && sshPassSet:
-				log.Fatal("Conflicting SSH auth flags: --ssh-key and --ssh-password/--ssh-passfile cannot both be set")
-			case sshAgentSet:
-				tui.SSHTunnelAuthMethod = "agent"
-			case sshKeySet:
-				tui.SSHTunnelAuthMethod = "key"
-			case sshPassSet:
-				tui.SSHTunnelAuthMethod = "password"
-			}
-
 			err := validateFlagSet(cmd)
 			if err != nil {
 				log.Fatalf(fmt.Sprint(err))
@@ -199,6 +164,41 @@ from the config file.`,
 				}
 			} else if tui.LdapServer == "" {
 				log.Fatal("No server address provided. Specify a server address, a config connection name, or set a default connection in the config file.")
+			}
+
+			// Apply GODAP_SSH_PASSWORD env var when no explicit SSH password flag was provided.
+			if !cmd.Flags().Changed("ssh-password") && !cmd.Flags().Changed("ssh-passfile") {
+				if envPw := os.Getenv("GODAP_SSH_PASSWORD"); envPw != "" {
+					tui.SSHTunnelPassword = envPw
+				}
+			}
+
+			// --ssh-passfile: read password from file or prompt on "-".
+			if cmd.Flags().Changed("ssh-passfile") {
+				pw, err := tui.ReadFileOrStdin(tui.SSHTunnelPasswordFile, "SSH Password: ")
+				if err != nil {
+					log.Fatalf("Failed to read SSH password file: %v", err)
+				}
+				tui.SSHTunnelPassword = strings.TrimSpace(pw)
+			}
+
+			// Infer SSH auth method from flags; explicit --ssh-auth is honoured only as a fallback.
+			sshAgentSet := tui.SSHTunnelAgentAuth
+			sshKeySet := cmd.Flags().Changed("ssh-key") || tui.SSHTunnelKeyFile != ""
+			sshPassSet := tui.SSHTunnelPassword != ""
+			switch {
+			case sshAgentSet && sshKeySet:
+				log.Fatal("Conflicting SSH auth flags: --ssh-agent and --ssh-key cannot both be set")
+			case sshAgentSet && sshPassSet:
+				log.Fatal("Conflicting SSH auth flags: --ssh-agent and --ssh-password/--ssh-passfile cannot both be set")
+			case sshKeySet && sshPassSet:
+				log.Fatal("Conflicting SSH auth flags: --ssh-key and --ssh-password/--ssh-passfile cannot both be set")
+			case sshAgentSet:
+				tui.SSHTunnelAuthMethod = "agent"
+			case sshKeySet:
+				tui.SSHTunnelAuthMethod = "key"
+			case sshPassSet:
+				tui.SSHTunnelAuthMethod = "password"
 			}
 
 			if tui.LdapPort == 0 {
