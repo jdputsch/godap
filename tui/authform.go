@@ -84,7 +84,7 @@ func resolveSecret(inline, fileFlag, promptIfTerm string) (string, error) {
 	if fileFlag == "" {
 		return strings.TrimSpace(inline), nil
 	}
-	v, err := readFileOrStdin(fileFlag, promptIfTerm)
+	v, err := ReadFileOrStdin(fileFlag, promptIfTerm)
 	return strings.TrimSpace(v), err
 }
 

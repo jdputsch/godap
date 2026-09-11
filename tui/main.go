@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -15,7 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Macmod/godap/v2/pkg/debug"
 	"github.com/Macmod/godap/v2/pkg/ldaputils"
+	sshtunnel "github.com/Macmod/godap/v2/pkg/ssh"
 	"github.com/RedTeamPentesting/adauth"
 	"github.com/gdamore/tcell/v2"
 	"github.com/go-ldap/ldap/v3"
@@ -69,6 +72,23 @@ var (
 	AuthMechanism string
 	ExportDir     string
 
+	// SSH tunnel settings
+	SSHTunnelEnabled       bool
+	SSHTunnelHost          string
+	SSHTunnelPort          int
+	SSHTunnelUser          string
+	SSHTunnelAuthMethod    string
+	SSHTunnelPassword      string
+	SSHTunnelPasswordFile  string
+	SSHTunnelAgentAuth     bool
+	SSHTunnelKeyFile       string
+	SSHTunnelKeyPassphrase string
+	SSHTunnelInsecure      bool
+	DebugLogPath           string
+
+	ConfigFile     string
+	ConnectionName string
+
 	page int
 )
 
@@ -87,9 +107,10 @@ var (
 	sortAttrsFlagPanel *tview.TextView
 	deletedFlagPanel   *tview.TextView
 
-	tlsConfig *tls.Config
-	lc        = &ldaputils.LDAPConn{}
-	err       error
+	tlsConfig    *tls.Config
+	lc           = &ldaputils.LDAPConn{}
+	err          error
+	activeTunnel *sshtunnel.Tunnel
 )
 
 type GodapPage struct {
@@ -276,7 +297,13 @@ func upgradeStartTLS() {
 
 func reconnectLdap() {
 	go app.QueueUpdateDraw(func() {
-		setupLDAPConn()
+		connErr := setupLDAPConn()
+		if connErr != nil {
+			var hkErr *sshtunnel.HostKeyUnknownError
+			if errors.As(connErr, &hkErr) {
+				showHostKeyModal(hkErr.Host)
+			}
+		}
 	})
 }
 
@@ -321,6 +348,45 @@ func openConfigForm() {
 		SetCurrentOption(currentMechanism)
 	authPages.SwitchToPage(authMechanisms[currentMechanism].ID)
 
+	// SSH tunnel form
+	sshForm := NewXForm()
+	sshPortStr := ""
+	if SSHTunnelPort != 0 {
+		sshPortStr = strconv.Itoa(SSHTunnelPort)
+	}
+	sshAuthIdx := 0
+	switch SSHTunnelAuthMethod {
+	case "passfile":
+		sshAuthIdx = 1
+	case "key":
+		sshAuthIdx = 2
+	case "agent":
+		sshAuthIdx = 3
+	}
+	sshForm.
+		AddInputField("SSH Host", SSHTunnelHost, 20, nil, nil).
+		AddInputField("SSH Port", sshPortStr, 8, nil, nil).
+		AddInputField("SSH User", SSHTunnelUser, 20, nil, nil).
+		AddDropDown("SSH Auth", []string{"password", "passfile", "key", "agent"}, sshAuthIdx, nil).
+		AddPasswordField("SSH Password", SSHTunnelPassword, 20, '*', nil).
+		AddInputField("SSH Password File", SSHTunnelPasswordFile, 30, nil, nil).
+		AddInputField("SSH Key File", SSHTunnelKeyFile, 30, nil, nil).
+		AddPasswordField("SSH Key Passphrase", SSHTunnelKeyPassphrase, 20, '*', nil).
+		AddCheckbox("Ignore Host Key", SSHTunnelInsecure, nil)
+
+	emptySSHBox := tview.NewBox()
+	sshSection := tview.NewPages().
+		AddPage("ssh-off", emptySSHBox, true, !SSHTunnelEnabled).
+		AddPage("ssh-on", sshForm, true, SSHTunnelEnabled)
+
+	configForm.AddCheckbox("SSH Tunnel", SSHTunnelEnabled, func(checked bool) {
+		if checked {
+			sshSection.SwitchToPage("ssh-on")
+		} else {
+			sshSection.SwitchToPage("ssh-off")
+		}
+	})
+
 	configForm.
 		AddButton("Go Back", func() {
 			app.SetRoot(appPanel, true).SetFocus(currentFocus)
@@ -343,18 +409,45 @@ func openConfigForm() {
 
 			AuthMechanism = mech.ID
 
+			// Update SSH tunnel settings
+			SSHTunnelEnabled = configForm.GetFormItemByLabel("SSH Tunnel").(*tview.Checkbox).IsChecked()
+			SSHTunnelHost = sshForm.GetFormItemByLabel("SSH Host").(*tview.InputField).GetText()
+			sshPort, _ := validateSSHPort(sshForm.GetFormItemByLabel("SSH Port").(*tview.InputField).GetText())
+			SSHTunnelPort = sshPort
+			SSHTunnelUser = sshForm.GetFormItemByLabel("SSH User").(*tview.InputField).GetText()
+			_, sshAuthMethod := sshForm.GetFormItemByLabel("SSH Auth").(*tview.DropDown).GetCurrentOption()
+			SSHTunnelPasswordFile = sshForm.GetFormItemByLabel("SSH Password File").(*tview.InputField).GetText()
+			if sshAuthMethod == "passfile" {
+				pw, err := ReadFileOrStdin(SSHTunnelPasswordFile, "SSH Password: ")
+				if err != nil {
+					updateLog(fmt.Sprintf("Failed to read SSH password file: %v", err), "red")
+					return
+				}
+				SSHTunnelPassword = strings.TrimSpace(pw)
+				SSHTunnelAuthMethod = "password"
+			} else {
+				SSHTunnelAuthMethod = sshAuthMethod
+				SSHTunnelPassword = sshForm.GetFormItemByLabel("SSH Password").(*tview.InputField).GetText()
+			}
+			SSHTunnelKeyFile = sshForm.GetFormItemByLabel("SSH Key File").(*tview.InputField).GetText()
+			SSHTunnelKeyPassphrase = sshForm.GetFormItemByLabel("SSH Key Passphrase").(*tview.InputField).GetText()
+			SSHTunnelInsecure = sshForm.GetFormItemByLabel("Ignore Host Key").(*tview.Checkbox).IsChecked()
+
 			app.SetRoot(appPanel, true).SetFocus(currentFocus)
 			reconnectLdap()
 		})
 
-	// Create configPanel container for both forms
-	configPanel := tview.NewFlex().
+	// Top row: connection settings + auth pages side by side
+	topRow := tview.NewFlex().
 		AddItem(configForm, 0, 1, true).
 		AddItem(authPages, 0, 1, false)
 
-	configPanel.SetBorder(true).SetTitle("Connection Configuration")
+	// Outer panel: top row stacked above SSH section
+	configPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(topRow, 0, 2, true).
+		AddItem(sshSection, 0, 1, false)
 
-	//assignFormTheme(credsForm)
+	configPanel.SetBorder(true).SetTitle("Connection Configuration")
 
 	configPanel.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEscape {
@@ -363,9 +456,16 @@ func openConfigForm() {
 		}
 
 		if event.Key() == tcell.KeyTab {
-			if app.GetFocus() == configForm {
+			switch app.GetFocus() {
+			case configForm:
 				app.SetFocus(authPages)
-			} else {
+			case authPages:
+				if SSHTunnelEnabled {
+					app.SetFocus(sshForm)
+				} else {
+					app.SetFocus(configForm)
+				}
+			default:
 				app.SetFocus(configForm)
 			}
 			return nil
@@ -415,7 +515,50 @@ func appPanelKeyHandler(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
-func readFileOrStdin(filename string, promptIfTerm string) (string, error) {
+// isSSHTunnelFieldVisible reports whether SSH tunnel fields should be shown in the config form.
+func isSSHTunnelFieldVisible() bool {
+	return SSHTunnelEnabled
+}
+
+// validateSSHPort parses s as an SSH port number.
+// An empty string returns (0, nil). An out-of-range or non-numeric value returns an error.
+func validateSSHPort(s string) (int, error) {
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 || n > 65535 {
+		return 0, fmt.Errorf("invalid SSH port: %q", s)
+	}
+	return n, nil
+}
+
+// showHostKeyModal displays a modal explaining that the SSH host key is unknown,
+// with instructions for adding it to known_hosts.
+func showHostKeyModal(host string) {
+	modal := tview.NewModal().
+		SetText(fmt.Sprintf(
+			"Unknown SSH host key for: %s\n\n"+
+				"To add it to known_hosts, run:\n"+
+				"  ssh-keyscan %s >> ~/.ssh/known_hosts\n\n"+
+				"Or restart godap with --ssh-ignore-host-key\n\n"+
+				"Press any key to dismiss.",
+			host, host,
+		)).
+		AddButtons([]string{"OK"}).
+		SetDoneFunc(func(_ int, _ string) {
+			app.SetRoot(appPanel, true)
+		})
+
+	modal.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		app.SetRoot(appPanel, true)
+		return nil
+	})
+
+	app.SetRoot(modal, true).SetFocus(modal)
+}
+
+func ReadFileOrStdin(filename string, promptIfTerm string) (string, error) {
 	if filename == "-" {
 		return readPass(promptIfTerm), nil
 	}
@@ -523,6 +666,42 @@ func setupLDAPConn() error {
 	tlsConfig = secureTlsConfig
 	if Insecure {
 		tlsConfig = insecureTlsConfig
+	}
+
+	// SSH tunnel lifecycle — close old tunnel, create new one if enabled.
+	// Shadow LdapServer/LdapPort so connectionParams() picks up the tunnel's
+	// local address. The defer restores the real values so the next reconnect
+	// sees the original server address and re-establishes the tunnel correctly.
+	if activeTunnel != nil {
+		activeTunnel.Close()
+		activeTunnel = nil
+	}
+	if SSHTunnelEnabled && SSHTunnelHost != "" {
+		port := SSHTunnelPort
+		if port == 0 {
+			port = 22
+		}
+		t, tunnelErr := sshtunnel.New(sshtunnel.Config{
+			Host:                  SSHTunnelHost,
+			Port:                  port,
+			User:                  SSHTunnelUser,
+			AuthMethod:            SSHTunnelAuthMethod,
+			Password:              SSHTunnelPassword,
+			KeyFile:               SSHTunnelKeyFile,
+			KeyPassphrase:         SSHTunnelKeyPassphrase,
+			InsecureIgnoreHostKey: SSHTunnelInsecure,
+		}, LdapServer, LdapPort)
+		if tunnelErr != nil {
+			debug.Log("SSH tunnel failed: %v", tunnelErr)
+			updateLog(fmt.Sprint(tunnelErr), "red")
+			updateStateBox(statusPanel, false)
+			return tunnelErr
+		}
+		debug.Log("SSH tunnel established on %s", t.LocalAddr())
+		activeTunnel = t
+		origServer, origPort := LdapServer, LdapPort
+		LdapServer, LdapPort = "127.0.0.1", t.LocalPort()
+		defer func() { LdapServer, LdapPort = origServer, origPort }()
 	}
 
 	ctx := context.Background()
@@ -682,6 +861,13 @@ func SetupApp() {
 
 	err := setupLDAPConn()
 	if err != nil {
+		var hkErr *sshtunnel.HostKeyUnknownError
+		if errors.As(err, &hkErr) {
+			log.Fatalf(
+				"Unknown SSH host key for %s\nRun: ssh-keyscan %s >> ~/.ssh/known_hosts\nOr use: --ssh-ignore-host-key",
+				hkErr.Host, hkErr.Host,
+			)
+		}
 		log.Fatal(err)
 	}
 

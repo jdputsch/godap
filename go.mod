@@ -9,12 +9,10 @@ require (
 	github.com/go-ldap/ldap/v3 v3.4.11
 	github.com/rivo/tview v0.0.0-20240413115534-b0d41c484b95
 	github.com/spf13/cobra v1.8.0
-	github.com/spf13/pflag v1.0.6
 	golang.org/x/crypto v0.40.0
 	golang.org/x/term v0.33.0
 	golang.org/x/text v0.27.0
-	h12.io/socks v1.0.3
-	software.sslmate.com/src/go-pkcs12 v0.5.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -40,7 +38,9 @@ require (
 	github.com/oiweiwei/gokrb5.fork/v9 v9.0.6 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/zerolog v1.34.0 // indirect
+	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/vadimi/go-ntlm v1.2.1 // indirect
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect
+	software.sslmate.com/src/go-pkcs12 v0.5.0 // indirect
 )
